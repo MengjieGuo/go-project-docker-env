@@ -1,0 +1,171 @@
+version: "3.4"
+
+services:
+  # https://medium.com/@chrischuck35/how-to-create-a-mysql-instance-with-docker-compose-1598f3cc1bee
+  mysql:
+    image: mysql
+    environment:
+      - MYSQL_DATABASE=payment
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=abcd1234
+      - MYSQL_ROOT_PASSWORD=abcd1234
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql:/var/lib/mysql
+    deploy:
+      restart_policy:
+        condition: always
+        delay: 1s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  # https://hub.docker.com/r/bitnami/consul/
+  # https://github.com/hashicorp/consul/tree/master/demo
+  consulserver:
+    image: progrium/consul:latest
+    hostname: consulserver
+    ports:
+      - "8300"
+      - "8400"
+      - "8500:8500"
+      - "53"
+    command: -server -ui-dir /ui -data-dir /tmp/consul --bootstrap-expect=2
+    deploy:
+      restart_policy:
+        condition: always
+        delay: 1s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  consulserver1:
+    image: progrium/consul:latest
+    hostname: consulserver1
+    depends_on:
+      - "consulserver"
+    ports:
+      - "8300"
+      - "8400"
+      - "8500"
+      - "53"
+    command: -server -data-dir /tmp/consul -join consulserver
+
+  nginx:
+    image: nginx
+    ports:
+      - "81:80"    # payment web
+      - "85:85"    # admin web
+      - "86:86"    # mch web
+      - "8443:443" # payment web
+    depends_on:
+      - payment-api
+      - payment-web
+    links:
+      - payment-web:payment-web
+      - payment-api:payment-api
+    volumes:
+      - "/path/to/site1/dist/:/static/admin/"     # 静态资源
+      - "/path/to/site2/dist/:/static/mch/"       # 静态资源
+      - "./nginx/nginx.conf:/etc/nginx/nginx.conf"
+      - "./nginx/confd/:/etc/nginx/conf.d/"
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        delay: 1s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+  # 数据库初始化用容器，可以忽略并删除该容器
+  mysql-migrate:
+    image: mysql
+    command: >
+      sh -c " pwd &&
+      sh script/db-migrate.sh"
+    volumes:
+      - "/path/to/db-migrate.sh:/script/db-migrate.sh"
+      - "/path/to/sql/:/sql/"
+      - "/path/to/cli.linux:/bin/cli.linux"
+  # 数据库初始化用容器，可以忽略并删除该容器
+  db-init:
+    image: golang:alpine
+    command: >
+      sh -c " pwd &&
+      sh script/db-init.sh"
+    volumes:
+      - "/path/to/db-init.sh:/go/script/db-init.sh"
+      - "/path/to/cli.linux:/go/bin/cli.linux"
+  # 当然，镜像需要自己封装
+  payment-api:
+    image: golang:191112
+    hostname: payment-api
+    environment:
+      - MICRO_REGISTRY=consul
+      - MICRO_REGISTRY_ADDRESS=consulserver:8500
+    stdin_open: true
+    # 这里先注册consul配置，后启动服务
+    command: >
+      sh -c "
+      sh /go/script/config.sh local api &&
+      ./bin/payment.linux"
+    volumes:
+      - sass_log:/usr/local/app/log
+      - "/path/to/config-docker.sh:/go/script/config.sh" # 挂载启动脚本，在consul注册配置
+      - "/path/to/api-docker.json:/go/config/local/api.json" # 要注册的配置
+      - "/path/to/payment.linux:/go/bin/payment.linux" # 要运行的go micro服务
+    ports:
+      - "8081:8080"
+
+  # 当然，镜像还是需要自己封装
+  payment-web:
+    hostname: payment-web
+    image: golang:191112
+    environment:
+      - MICRO_REGISTRY=consul
+      - MICRO_REGISTRY_ADDRESS=consulserver:8500
+    stdin_open: true
+    # 这里先注册consul配置，后启动服务
+    command: >
+      sh -c "ls config &&
+      sh /go/script/config.sh local web &&
+      ./bin/web.linux"
+    volumes:
+      - sass_log:/usr/local/app/log
+      - "/path/to/config-docker.sh:/go/script/config.sh"
+      - "/path/to/web-docker.json:/go/config/local/web.json"
+      - "/path/to/web.linux:/go/bin/web.linux"
+    ports:
+      - "6061:6060"
+
+volumes:
+  mysql:
+    name: "mysql"
+    driver: "local"
+    driver_opts:
+      type: "none"
+      o: "bind"
+      device: "/tmp/docker/mysql"
+
+  consul:
+    name: "consul"
+    driver: "local"
+    driver_opts:
+      type: "none"
+      o: "bind"
+      device: "/tmp/docker/consul"
+
+  sass_log:
+    name: "sass_log"
+    driver: "local"
+    driver_opts:
+      type: "none"
+      o: "bind"
+      device: "/tmp/docker/sass_log"
